@@ -46,10 +46,6 @@ Your dossier opens automatically in the browser.
 - `cargo` — install via [rustup](https://rustup.rs/) for Rust binaries
 - `mas` — install via `brew install mas` for Mac App Store apps. You must also be signed into the App Store. Without it, the MAS section is skipped silently.
 
-## Sample data
-
-Open `index.html` directly in a browser (without running the script) to see 47 built-in sample packages. Useful for previewing the UI or working on the frontend.
-
 ## System gems
 
 The scanner detects which Ruby gems shipped with macOS and marks them with a "system" label on their cards. When default gems are present, a **hide macOS defaults** checkbox appears in the filter bar to remove them from view.

@@ -76,6 +76,20 @@
        Two-column grid: package cards on the left,
        detail panel on the right.
        ========================================================= -->
+  <!-- =========================================================
+       EMPTY STATE
+       Shown when no package data has been loaded yet.
+       The [hidden] attribute is removed by JS when needed.
+       ========================================================= -->
+  <div class="empty-state" id="empty-state" hidden>
+    <p class="empty-state__eyebrow">No dossier on file</p>
+    <p class="empty-state__body">Run the scanner to build your package inventory.</p>
+    <div class="empty-state__cmd">
+      <span class="empty-state__prompt">$</span>
+      <code>./stockpile</code>
+    </div>
+  </div>
+
   <main class="content">
     <!-- Package card grid — cards injected by JS -->
     <section class="grid" id="grid" aria-label="Package list"></section>
@@ -83,18 +97,6 @@
 
   <!-- Detail dialog — opened by showModal() when a card is selected -->
   <dialog class="detail" id="detail" aria-label="Package details"></dialog>
-
-  <!-- =========================================================
-       EMPTY STATE
-       Shown when no package data has been loaded yet.
-       The [hidden] attribute is removed by JS when needed.
-       ========================================================= -->
-  <div class="empty-state" id="empty-state" hidden>
-    <p>Run <code>./stockpile</code> to scan your packages</p>
-    <button id="load-sample-btn" class="btn" aria-label="Load sample package data">
-      Load sample data
-    </button>
-  </div>
 
   <script src="scripts/app.js"></script>
 
