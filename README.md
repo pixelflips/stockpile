@@ -1,14 +1,22 @@
 # stockpile
 
-A local-first macOS package explorer. Scans installed packages across 7 managers and displays them in a visual dashboard. Built for developers who want a quick inventory of everything installed on their machine.
+Know what's in your arsenal.
+
+Every package you've ever installed, catalogued in a browser-based dossier you can search, filter, and interrogate. No more jumping between package managers to find something your AI agent quietly installed three deploys ago.
+
+One command. No server. Runs entirely on your machine.
 
 <!-- screenshot goes here -->
 
 ## Quick start
 
-1. Clone the repo
-2. Run `./stockpile`
-3. Done -- your browser opens with the dashboard
+```bash
+git clone https://github.com/pixelflips/stockpile
+cd stockpile
+./stockpile
+```
+
+Your dossier opens automatically in the browser.
 
 ## Flags
 
@@ -28,27 +36,31 @@ A local-first macOS package explorer. Scans installed packages across 7 managers
 | `cargo` | Rust binaries         |
 | `mas`   | Mac App Store apps    |
 
+## Requirements
+
+- macOS
+- python3 (ships with Xcode Command Line Tools — install via `xcode-select --install`)
+
+**Optional — install these to include their packages in your inventory:**
+
+- `cargo` — install via [rustup](https://rustup.rs/) for Rust binaries
+- `mas` — install via `brew install mas` for Mac App Store apps. You must also be signed into the App Store. Without it, the MAS section is skipped silently.
+
 ## Sample data
 
 Open `index.html` directly in a browser (without running the script) to see 47 built-in sample packages. Useful for previewing the UI or working on the frontend.
 
-## Mine vs system
+## System gems
 
-The scanner detects which Ruby gems shipped with macOS and which you installed yourself. Default gems are marked with a "system" label on their cards, and you can filter by source using the "mine / system" toggle in the filter bar.
+The scanner detects which Ruby gems shipped with macOS and marks them with a "system" label on their cards. When default gems are present, a **hide macOS defaults** checkbox appears in the filter bar to remove them from view.
 
 ## How it works
 
-The `stockpile` bash script scans each package manager, collects the results into a JSON array, injects that JSON into `scripts/app.js`, and opens `index.html` in your default browser. No server, no build step.
-
-## Requirements
-
-- macOS
-- python3 (ships with Xcode Command Line Tools -- install via `xcode-select --install`)
-- Optional: `mas` (Mac App Store CLI), `cargo` (Rust toolchain)
+The `stockpile` bash script scans each package manager, assembles the results into a JSON array, and injects it into `scripts/app.js`. Then it opens `index.html` in your default browser. No server, no build step.
 
 ## Contributing
 
-Contributions are welcome. Open an issue or submit a pull request. Keep changes focused and minimal.
+Open an issue or submit a pull request. Keep changes focused and minimal.
 
 ## License
 
