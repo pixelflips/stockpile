@@ -20,7 +20,14 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────
 FAST=false
-[[ "${1:-}" == "--fast" ]] && FAST=true
+if [[ $# -gt 0 ]]; then
+  if [[ "$1" != "--fast" ]]; then
+    echo "error: unknown option: $1" >&2
+    echo "usage: ./stockpile [--fast]" >&2
+    exit 1
+  fi
+  FAST=true
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_JS="$SCRIPT_DIR/scripts/app.js"
@@ -40,7 +47,7 @@ fi
 # ── Temp directory ───────────────────────────────────────────
 # Use a temp directory for intermediate scan results.
 # This avoids shell quoting issues when passing JSON between functions.
-TMPDIR_SP=$(mktemp -d /tmp/stockpile.XXXXXX)
+TMPDIR_SP=$(mktemp -d "${TMPDIR:-/tmp}/stockpile.XXXXXX")
 trap 'rm -rf "$TMPDIR_SP"' EXIT
 
 # ── Pre-fetch: brew info ──────────────────────────────────────
@@ -560,15 +567,23 @@ main() {
 
   # Each scan function writes to stdout; redirect to temp files.
   # This keeps JSON out of shell variables entirely.
-  # The "|| true" ensures a single scanner failure doesn't abort the run
-  # (set -e + pipefail would otherwise kill the script).
-  scan_brew  > "$TMPDIR_SP/brew.json"  || true
-  scan_cask  > "$TMPDIR_SP/cask.json"  || true
-  scan_npm   > "$TMPDIR_SP/npm.json"   || true
-  scan_pip   > "$TMPDIR_SP/pip.json"   || true
-  scan_gem   > "$TMPDIR_SP/gem.json"   || true
-  scan_cargo > "$TMPDIR_SP/cargo.json" || true
-  scan_mas   > "$TMPDIR_SP/mas.json"   || true
+  # run_scan wraps each scanner: on failure it warns and writes an empty
+  # array so the assembly step still has a valid file to read.
+  run_scan() {
+    local name=$1 func=$2
+    if ! "$func" > "$TMPDIR_SP/${name}.json"; then
+      echo "  warning: ${name} scan failed — skipping" >&2
+      echo "[]" > "$TMPDIR_SP/${name}.json"
+    fi
+  }
+
+  run_scan brew  scan_brew
+  run_scan cask  scan_cask
+  run_scan npm   scan_npm
+  run_scan pip   scan_pip
+  run_scan gem   scan_gem
+  run_scan cargo scan_cargo
+  run_scan mas   scan_mas
 
   echo "" >&2
   echo "  assembling results..." >&2

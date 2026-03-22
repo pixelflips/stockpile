@@ -22,7 +22,7 @@ Your dossier opens automatically in the browser.
 
 | Flag     | Description                                      |
 |----------|--------------------------------------------------|
-| `--fast` | Skip brew description lookups for a faster scan. |
+| `--fast` | Skip package description lookups for a faster scan. |
 
 ## Package types
 
