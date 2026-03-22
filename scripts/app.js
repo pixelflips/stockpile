@@ -587,8 +587,7 @@ function showCopyFeedback() {
 
 /**
  * init — entry point called once the DOM is ready.
- * Loads SCAN_DATA if present, otherwise shows the empty state,
- * and wires up the "Load sample data" button.
+ * Loads SCAN_DATA if present, otherwise shows the empty state.
  */
 function init() {
   if (SCAN_DATA && typeof SCAN_DATA === 'object' && Array.isArray(SCAN_DATA.packages)) {
