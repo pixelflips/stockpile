@@ -1,0 +1,588 @@
+#!/usr/bin/env bash
+# ──────────────────────────────────────────────────────────────
+# stockpile — macOS package inventory scanner
+#
+# Scans installed packages across 7 managers (brew, cask, npm,
+# pip, gem, cargo, mas), injects the results into index.html,
+# and opens the file in your default browser.
+#
+# Usage:
+#   ./stockpile              Full scan with descriptions
+#   ./stockpile --fast       Skip description lookups (faster)
+#
+# Requires: bash 3.2+, python3
+#   python3 ships with Xcode Command Line Tools. Install them:
+#   xcode-select --install
+#
+# Optional: mas (Mac App Store CLI), cargo (Rust toolchain)
+# ──────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# ── Configuration ────────────────────────────────────────────
+FAST=false
+[[ "${1:-}" == "--fast" ]] && FAST=true
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_JS="$SCRIPT_DIR/scripts/app.js"
+
+# ── Dependency check ─────────────────────────────────────────
+if ! command -v python3 &>/dev/null; then
+  echo "error: python3 is required but not found." >&2
+  echo "  Install Xcode Command Line Tools: xcode-select --install" >&2
+  exit 1
+fi
+
+if [[ ! -f "$APP_JS" ]]; then
+  echo "error: scripts/app.js not found in $SCRIPT_DIR" >&2
+  exit 1
+fi
+
+# ── Temp directory ───────────────────────────────────────────
+# Use a temp directory for intermediate scan results.
+# This avoids shell quoting issues when passing JSON between functions.
+TMPDIR_SP=$(mktemp -d /tmp/stockpile.XXXXXX)
+trap 'rm -rf "$TMPDIR_SP"' EXIT
+
+# ── Pre-fetch: brew info ──────────────────────────────────────
+# brew info --json=v2 --installed returns formulae AND casks in one
+# call, including descriptions for both. We save this to a shared
+# temp file so scan_brew and scan_cask can both read it without
+# making duplicate network/disk requests.
+prefetch_brew() {
+  if ! command -v brew &>/dev/null; then
+    return
+  fi
+  if [[ "$FAST" == true ]]; then
+    return
+  fi
+  echo "  fetching brew package info..." >&2
+  brew info --json=v2 --installed 2>/dev/null > "$TMPDIR_SP/brew_raw.json" || true
+}
+
+# ── Scan functions ───────────────────────────────────────────
+# Each function outputs a JSON array string to stdout.
+# If the tool is not installed, outputs "[]" and logs to stderr.
+
+scan_brew() {
+  if ! command -v brew &>/dev/null; then
+    echo "  skipping brew (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning brew formulae..." >&2
+
+  if [[ "$FAST" == true ]]; then
+    # Fast mode: names + versions only, no descriptions
+    brew list --formula --versions 2>/dev/null | python3 -c "
+import sys, json
+packages = []
+for line in sys.stdin:
+    parts = line.strip().split()
+    if parts:
+        packages.append({
+            'name': parts[0],
+            'version': parts[1] if len(parts) > 1 else '',
+            'desc': '',
+            'type': 'brew',
+            'default': False
+        })
+print(json.dumps(packages))
+"
+  else
+    # Full mode: read from the pre-fetched brew info JSON
+    python3 -c "
+import json, os
+raw = os.path.join(os.environ.get('TMPDIR_SP', '/tmp'), 'brew_raw.json')
+packages = []
+try:
+    with open(raw) as f:
+        data = json.load(f)
+    for f in data.get('formulae', []):
+        packages.append({
+            'name': f.get('name', ''),
+            'version': (f.get('versions', {}).get('stable', '')
+                        or (f.get('installed', [{}])[0].get('version', '') if f.get('installed') else '')),
+            'desc': f.get('desc', ''),
+            'type': 'brew',
+            'default': False
+        })
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+print(json.dumps(packages))
+"
+  fi
+}
+
+scan_cask() {
+  if ! command -v brew &>/dev/null; then
+    echo "  skipping cask (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning casks..." >&2
+
+  if [[ "$FAST" == true ]]; then
+    # Fast mode: names + versions only, no descriptions
+    brew list --cask --versions 2>/dev/null | python3 -c "
+import sys, json
+packages = []
+for line in sys.stdin:
+    parts = line.strip().split()
+    if parts:
+        packages.append({
+            'name': parts[0],
+            'version': parts[1] if len(parts) > 1 else '',
+            'desc': '',
+            'type': 'cask',
+            'default': False
+        })
+print(json.dumps(packages))
+"
+  else
+    # Full mode: read from the pre-fetched brew info JSON.
+    # brew info --json=v2 --installed returns casks in a 'casks' key,
+    # each with a 'desc' field — same source as formulae, no extra call.
+    python3 -c "
+import json, os
+raw = os.path.join(os.environ.get('TMPDIR_SP', '/tmp'), 'brew_raw.json')
+packages = []
+try:
+    with open(raw) as f:
+        data = json.load(f)
+    for c in data.get('casks', []):
+        packages.append({
+            'name': c.get('token', ''),
+            'version': c.get('installed', '') or c.get('version', ''),
+            'desc': c.get('desc', ''),
+            'type': 'cask',
+            'default': False
+        })
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+print(json.dumps(packages))
+"
+  fi
+}
+
+scan_npm() {
+  if ! command -v npm &>/dev/null; then
+    echo "  skipping npm (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning npm globals..." >&2
+
+  # Get the global node_modules path, then read each package's package.json
+  # for its description. This is a local filesystem read — no network calls.
+  npm root -g 2>/dev/null | python3 -c "
+import sys, json, os
+
+npm_root = sys.stdin.read().strip()
+packages = []
+
+if not os.path.isdir(npm_root):
+    print(json.dumps(packages))
+    sys.exit(0)
+
+for name in os.listdir(npm_root):
+    # Scoped packages live in subdirectories named '@scope'
+    if name.startswith('@'):
+        scope_dir = os.path.join(npm_root, name)
+        if os.path.isdir(scope_dir):
+            for pkg in os.listdir(scope_dir):
+                pkg_json = os.path.join(scope_dir, pkg, 'package.json')
+                if os.path.isfile(pkg_json):
+                    try:
+                        with open(pkg_json) as f:
+                            data = json.load(f)
+                        packages.append({
+                            'name': f'{name}/{pkg}',
+                            'version': data.get('version', ''),
+                            'desc': data.get('description', ''),
+                            'type': 'npm',
+                            'default': False
+                        })
+                    except (json.JSONDecodeError, OSError):
+                        pass
+    else:
+        pkg_json = os.path.join(npm_root, name, 'package.json')
+        if os.path.isfile(pkg_json):
+            try:
+                with open(pkg_json) as f:
+                    data = json.load(f)
+                packages.append({
+                    'name': name,
+                    'version': data.get('version', ''),
+                    'desc': data.get('description', ''),
+                    'type': 'npm',
+                    'default': False
+                })
+            except (json.JSONDecodeError, OSError):
+                pass
+
+print(json.dumps(packages))
+"
+}
+
+scan_pip() {
+  if ! command -v pip3 &>/dev/null; then
+    echo "  skipping pip (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning pip packages..." >&2
+
+  if [[ "$FAST" == true ]]; then
+    # Fast mode: list only, no descriptions
+    pip3 list --format=json 2>/dev/null | python3 -c "
+import sys, json
+packages = []
+try:
+    data = json.load(sys.stdin)
+    for pkg in data:
+        packages.append({
+            'name': pkg.get('name', ''),
+            'version': pkg.get('version', ''),
+            'desc': '',
+            'type': 'pip',
+            'default': False
+        })
+except (json.JSONDecodeError, KeyError):
+    pass
+print(json.dumps(packages))
+"
+  else
+    # Full mode: 'pip3 show' accepts multiple names in one call and
+    # returns a Summary field for each. Parse the multi-block output.
+    pip3 list --format=json 2>/dev/null | python3 -c "
+import sys, json, subprocess
+
+packages = []
+try:
+    data = json.load(sys.stdin)
+    names = [pkg['name'] for pkg in data if pkg.get('name')]
+    versions = {pkg['name'].lower(): pkg.get('version', '') for pkg in data}
+except (json.JSONDecodeError, KeyError):
+    print(json.dumps(packages))
+    sys.exit(0)
+
+if not names:
+    print(json.dumps(packages))
+    sys.exit(0)
+
+# pip3 show accepts multiple package names in one call
+try:
+    result = subprocess.run(
+        ['pip3', 'show'] + names,
+        capture_output=True, text=True
+    )
+    # Output is blocks separated by '---', each with 'Name:' and 'Summary:' fields
+    def flush(cur):
+        if not cur.get('name'):
+            return
+        summary = cur.get('summary', '')
+        # Skip placeholder values pip uses when metadata is missing
+        if summary.lower() in ('unknown', 'none', 'n/a', ''):
+            summary = ''
+        packages.append({
+            'name': cur['name'],
+            'version': versions.get(cur['name'].lower(), ''),
+            'desc': summary,
+            'type': 'pip',
+            'default': False
+        })
+
+    current = {}
+    for line in result.stdout.splitlines():
+        if line == '---':
+            flush(current)
+            current = {}
+        elif line.startswith('Name:'):
+            current['name'] = line.split(':', 1)[1].strip()
+        elif line.startswith('Summary:'):
+            current['summary'] = line.split(':', 1)[1].strip()
+    # Capture the last block (no trailing '---')
+    flush(current)
+except Exception:
+    pass
+
+print(json.dumps(packages))
+"
+  fi
+}
+
+scan_gem() {
+  if ! command -v gem &>/dev/null; then
+    echo "  skipping gem (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning gems..." >&2
+
+  if [[ "$FAST" == true ]]; then
+    # Fast mode: 'gem list' with no descriptions
+    # Default (system) gems include "default:" in the version string,
+    # e.g. "json (default: 2.1.0)". Strip the prefix for a clean version.
+    gem list 2>/dev/null | python3 -c "
+import sys, json, re
+packages = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line or line.startswith('***'):
+        continue
+    match = re.match(r'^(.+?)\s+\((.+)\)$', line)
+    if match:
+        name = match.group(1).strip()
+        version = match.group(2).split(',')[0].strip()
+        is_default = version.startswith('default:')
+        if is_default:
+            version = version.replace('default:', '').strip()
+        packages.append({
+            'name': name,
+            'version': version,
+            'desc': '',
+            'type': 'gem',
+            'default': is_default
+        })
+print(json.dumps(packages))
+"
+  else
+    # Full mode: 'gem list -d' outputs descriptions inline.
+    # Header format: 'name (default: X.Y.Z)' for system gems, 'name (X.Y.Z)' for user gems.
+    # Indented lines that follow each header are a mix of metadata fields
+    # (Author:, Authors:, Homepage:, License:, Installed at) and the actual
+    # description text. We skip the metadata lines and keep only the description.
+    gem list -d 2>/dev/null | python3 -c "
+import sys, json, re
+
+# These prefixes identify metadata lines — they are not part of the description.
+METADATA_PREFIXES = (
+    'Author:', 'Authors:', 'Homepage:', 'License:',
+    'Installed at', 'Email:', 'Date:', 'Platforms:',
+    'Specification Version:', 'Executables:', 'Signing Key:', 'Checksum:',
+)
+
+packages = []
+current_name = None
+current_version = ''
+current_is_default = False
+current_desc_lines = []
+past_blank = False  # description follows a blank line within the indented block
+
+def flush(name, version, is_default, desc_lines):
+    if name:
+        packages.append({
+            'name': name,
+            'version': version,
+            'desc': ' '.join(desc_lines).strip(),
+            'type': 'gem',
+            'default': is_default
+        })
+
+for line in sys.stdin:
+    raw = line.rstrip()
+    stripped = raw.strip()
+
+    if stripped.startswith('***'):
+        continue
+
+    # A gem header line is not indented, e.g. 'bundler (1.17.2)'
+    if not raw.startswith(' ') and not raw.startswith('\t') and stripped:
+        flush(current_name, current_version, current_is_default, current_desc_lines)
+        current_desc_lines = []
+        current_is_default = False
+        past_blank = False
+        match = re.match(r'^(.+?)\s+\((.+)\)$', stripped)
+        if match:
+            current_name = match.group(1).strip()
+            current_version = match.group(2).split(',')[0].strip()
+        else:
+            current_name = stripped
+            current_version = ''
+    elif current_name:
+        # Inside a gem block: blank line separates metadata from description.
+        if not stripped:
+            past_blank = True
+        elif stripped.startswith('Installed at (default):'):
+            # This gem ships with macOS — mark it as a system default
+            current_is_default = True
+        elif past_blank:
+            # Lines after the blank separator are the actual description
+            current_desc_lines.append(stripped)
+
+flush(current_name, current_version, current_is_default, current_desc_lines)
+print(json.dumps(packages))
+"
+  fi
+}
+
+scan_cargo() {
+  if ! command -v cargo &>/dev/null; then
+    echo "  skipping cargo (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning cargo binaries..." >&2
+
+  # cargo install --list outputs:
+  #   package_name v0.1.0:
+  #       binary1
+  #       binary2
+  # We only want the "name vX.Y.Z:" lines.
+  # Descriptions are not available from cargo without network calls.
+  cargo install --list 2>/dev/null | python3 -c "
+import sys, json, re
+packages = []
+for line in sys.stdin:
+    # Match lines like 'ripgrep v14.1.0:' (not indented binary lines)
+    match = re.match(r'^(\S+)\s+v(\S+):$', line.strip())
+    if match:
+        packages.append({
+            'name': match.group(1),
+            'version': match.group(2),
+            'desc': '',
+            'type': 'cargo',
+            'default': False
+        })
+print(json.dumps(packages))
+"
+}
+
+scan_mas() {
+  if ! command -v mas &>/dev/null; then
+    echo "  skipping mas (not installed)" >&2
+    echo "[]"
+    return
+  fi
+
+  echo "  scanning Mac App Store..." >&2
+
+  # mas list outputs: "497799835  Xcode (15.3)"
+  # Descriptions are not available from the mas CLI.
+  mas list 2>/dev/null | python3 -c "
+import sys, json, re
+packages = []
+for line in sys.stdin:
+    # Match: ID  Name (version)
+    match = re.match(r'^\s*\d+\s+(.+?)\s*\((.+?)\)\s*$', line)
+    if match:
+        packages.append({
+            'name': match.group(1).strip(),
+            'version': match.group(2).strip(),
+            'desc': '',
+            'type': 'mas',
+            'default': False
+        })
+print(json.dumps(packages))
+"
+}
+
+# ── Assembly ─────────────────────────────────────────────────
+# Combine all scan results into a single JSON envelope and
+# inject it into index.html.
+#
+# Reads JSON arrays from temp files (one per package type).
+# Assembles the envelope, escapes for <script> safety, and
+# replaces the SCAN_DATA line in index.html.
+
+assemble_and_inject() {
+  python3 << 'PYEOF'
+import json, datetime, socket, re, os, sys
+
+tmp = os.environ.get('TMPDIR_SP', '/tmp')
+index_file = os.environ.get('APP_JS', 'scripts/app.js')
+
+# Read each scan result from its temp file
+types = ['brew', 'cask', 'npm', 'pip', 'gem', 'cargo', 'mas']
+all_packages = []
+for t in types:
+    path = os.path.join(tmp, f'{t}.json')
+    if os.path.exists(path):
+        with open(path) as f:
+            try:
+                all_packages.extend(json.load(f))
+            except json.JSONDecodeError:
+                pass
+
+# Build the envelope
+envelope = {
+    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'host': socket.gethostname(),
+    'packages': all_packages
+}
+
+# Serialize and escape </ to <\/ for safe <script> embedding
+json_str = json.dumps(envelope)
+json_str = json_str.replace('</', '<\\/')
+
+# Read app.js
+with open(index_file, 'r') as f:
+    html = f.read()
+
+# Replace the SCAN_DATA line using simple string operations.
+# We avoid re.sub here because the JSON payload can contain backslash
+# sequences (e.g. \u from Unicode escapes in descriptions) that Python's
+# regex engine misinterprets as regex escape sequences in the replacement.
+lines = html.split('\n')
+for i, line in enumerate(lines):
+    stripped = line.lstrip()
+    if stripped.startswith('const SCAN_DATA = '):
+        indent = line[:len(line) - len(stripped)]
+        lines[i] = indent + 'const SCAN_DATA = ' + json_str + ';'
+        break
+html = '\n'.join(lines)
+
+# Write back
+with open(index_file, 'w') as f:
+    f.write(html)
+
+total = len(all_packages)
+type_count = len(set(p['type'] for p in all_packages))
+print(f'{total}|{type_count}')
+PYEOF
+}
+
+# ── Main ─────────────────────────────────────────────────────
+main() {
+  echo "stockpile — scanning your packages..." >&2
+  echo "" >&2
+
+  # Pre-fetch brew data once — used by both scan_brew and scan_cask.
+  # This avoids calling 'brew info --json=v2 --installed' twice.
+  export TMPDIR_SP APP_JS
+  prefetch_brew
+
+  # Each scan function writes to stdout; redirect to temp files.
+  # This keeps JSON out of shell variables entirely.
+  # The "|| true" ensures a single scanner failure doesn't abort the run
+  # (set -e + pipefail would otherwise kill the script).
+  scan_brew  > "$TMPDIR_SP/brew.json"  || true
+  scan_cask  > "$TMPDIR_SP/cask.json"  || true
+  scan_npm   > "$TMPDIR_SP/npm.json"   || true
+  scan_pip   > "$TMPDIR_SP/pip.json"   || true
+  scan_gem   > "$TMPDIR_SP/gem.json"   || true
+  scan_cargo > "$TMPDIR_SP/cargo.json" || true
+  scan_mas   > "$TMPDIR_SP/mas.json"   || true
+
+  echo "" >&2
+  echo "  assembling results..." >&2
+
+  RESULT=$(assemble_and_inject)
+
+  TOTAL=$(echo "$RESULT" | cut -d'|' -f1)
+  TYPES=$(echo "$RESULT" | cut -d'|' -f2)
+
+  echo "" >&2
+  echo "✓ ${TOTAL} packages found across ${TYPES} manager(s)" >&2
+  echo "  → opening index.html" >&2
+
+  open "$SCRIPT_DIR/index.html"
+}
+
+main
